@@ -13,6 +13,57 @@
 ####
 set(FPRIME_TARGET_LIST "" CACHE INTERNAL "FPRIME_TARGET_LIST: custom fprime targets" FORCE)
 set(FPRIME_UT_TARGET_LIST "" CACHE INTERNAL "FPRIME_UT_TARGET_LIST: custom fprime targets" FORCE)
+set(FPRIME_AUTOCODER_TARGET_LIST "" CACHE INTERNAL "FPRIME_AUTOCODER_TARGET_LIST: custom fprime targets" FORCE)
+
+####
+# Macro `restrict_platforms`:
+#
+# Restricts a CMakeLists.txt file to a given list of platforms. This prevents usage on platforms for which the module
+# is incapable of being used and replaces the historical pattern of an if-tree detecting unsupported platforms.
+#
+# Usage:
+#    restrict_platforms(Linux Darwin) # Restricts to Linux and Darwin platforms
+#
+# Args:
+#   ARGN: list of platforms that are supported
+#####
+macro(restrict_platforms)
+    set(__CHECKER ${ARGN})
+    if (NOT CMAKE_SYSTEM_NAME IN_LIST __CHECKER)
+        get_module_name("${CMAKE_CURRENT_LIST_DIR}")
+        message(STATUS "Platform ${CMAKE_SYSTEM_NAME} not supported for module ${MODULE_NAME}")
+        return()
+    endif()
+endmacro()
+
+####
+# Macro `prevent_prescan`:
+#
+# Prevents a CMakeLists.txt file from being processed in the prescan phase of the project. Will generate fake targets
+# for all those targets specified to ensure that dependencies may be attached to these targets in the larger system.
+#
+# Usage:
+#    prevent_prescan(target1 target2 ...) # Generate fake targets and skip prescan
+#
+# Args:
+#   ARGN: list of targets to synthesize
+#####
+macro(prevent_prescan)
+    set(__CHECKER_TARGETS ${ARGN})
+    if (DEFINED FPRIME_PRESCAN)
+        foreach (__TARGET IN LISTS __CHECKER_TARGETS)
+            # Make prevent prescan safe in the case of multiple calls
+            if (NOT TARGET ${__TARGET})
+                add_custom_target(${__TARGET})
+            endif()
+        endforeach()
+        string(REPLACE ";" " " __SPACE_LIST_TARGETS "${__CHECKER_TARGETS}")
+        get_module_name("${CMAKE_CURRENT_LIST_DIR}")
+        message(STATUS "Skipping ${MODULE_NAME} during prescan, adding faux libraries: ${__SPACE_LIST_TARGETS}")
+        return()
+    endif()
+endmacro()
+
 ####
 # Function `add_fprime_subdirectory`:
 #
@@ -41,6 +92,9 @@ set(FPRIME_UT_TARGET_LIST "" CACHE INTERNAL "FPRIME_UT_TARGET_LIST: custom fprim
 #                          https://cmake.org/cmake/help/latest/command/add_fprime_subdirectory.html
 ####
 function(add_fprime_subdirectory FP_SOURCE_DIR)
+    get_module_name("${FP_SOURCE_DIR}")
+    set(FPRIME_CURRENT_MODULE "${MODULE_NAME}")
+
     # Check if the binary and source directory are in agreement. If they agree, then normally add
     # the directory, as no adjustments need be made.
     get_filename_component(CBD_NAME "${CMAKE_CURRENT_BINARY_DIR}" NAME)
@@ -67,13 +121,13 @@ endfunction(add_fprime_subdirectory)
 #
 # Required variables (defined in calling scope):
 #
-# - **SOURCE_FILES:** cmake list of input source files. Place any "*.fpp", "*Ai.xml", "*.c", "*.cpp"
+# - **SOURCE_FILES:** cmake list of input source files. Place any "*.fpp", "*.c", "*.cpp"
 #   etc files here. This list will be split into autocoder inputs, and hand-coded sources based on the name/type.
 #
 # **i.e.:**
 # ```
 # set(SOURCE_FILES
-#     MyComponentAi.xml
+#     MyComponent.fpp
 #     SomeFile.cpp
 #     MyComponentImpl.cpp)
 # ```
@@ -100,7 +154,7 @@ endfunction(add_fprime_subdirectory)
 #
 # ```
 # set(SOURCE_FILE
-#     MyComponentAi.xml
+#     MyComponent.fpp
 #     SomeFile.cpp
 #     MyComponentImpl.cpp)
 #
@@ -123,7 +177,7 @@ endfunction(add_fprime_subdirectory)
 #
 # ```
 # set(SOURCE_FILE
-#     MyComponentAi.xml)
+#     MyComponent.fpp)
 #
 # register_fprime_module()
 # ```
@@ -136,7 +190,7 @@ endfunction(add_fprime_subdirectory)
 # 
 # ```
 # set(SOURCE_FILE
-#     MyComponentAi.xml
+#     MyComponent.fpp
 #     SomeFile.cpp
 #     MyComponentImpl.cpp)
 #
@@ -156,7 +210,12 @@ function(register_fprime_module)
     if (${ARGC} GREATER 0)
         set(MODULE_NAME ${ARGV0})
     else()
-        get_module_name("${CMAKE_CURRENT_LIST_DIR}")
+        # Check to be sure before using
+        if (NOT DEFINED FPRIME_CURRENT_MODULE)
+            message(FATAL_ERROR "FPRIME_CURRENT_MODULE not defined. Please supply name to: register_fprime_module()")
+        endif()
+
+        set(MODULE_NAME ${FPRIME_CURRENT_MODULE})
     endif()
     # Explicit call to module register
     generate_library("${MODULE_NAME}" "${SOURCE_FILES}" "${MOD_DEPS}")
@@ -179,14 +238,14 @@ endfunction(register_fprime_module)
 #
 #
 # - **EXECUTABLE_NAME:** (optional) executable name supplied. If not set, nor passed in, then
-#                     PROJECT_NAME from the CMake definitions is used.
+#                     FPRIME_CURRENT_MODULE from the CMake definitions is used.
 #
-# - **SOURCE_FILES:** cmake list of input source files. Place any "*Ai.xml", "*.c", "*.cpp"
+# - **SOURCE_FILES:** cmake list of input source files. Place any "*.fpp", "*.c", "*.cpp"
 #                  etc. files here. This list will be split into autocoder inputs and sources.
 # **i.e.:**
 # ```
 # set(SOURCE_FILES
-#     MyComponentAi.xml
+#     MyComponent.fpp
 #     SomeFile.cpp
 #     MyComponentImpl.cpp)
 # ```
@@ -227,17 +286,20 @@ endfunction(register_fprime_module)
 # ```
 ####
 function(register_fprime_executable)
-    get_module_name("${CMAKE_CURRENT_LIST_DIR}")
     if (NOT DEFINED SOURCE_FILES AND NOT DEFINED MOD_DEPS)
         message(FATAL_ERROR "SOURCE_FILES or MOD_DEPS must be defined when registering an executable")
-    elseif (NOT DEFINED EXECUTABLE_NAME AND ARGC LESS 1 AND TARGET "${MODULE_NAME}")
+    elseif (NOT DEFINED EXECUTABLE_NAME AND ARGC LESS 1 AND TARGET "${FPRIME_CURRENT_MODULE}")
         message(FATAL_ERROR "EXECUTABLE_NAME must be set or passed in. Use register_fprime_deployment() for deployments")
     endif()
     # MODULE_NAME is used for the executable name, unless otherwise specified.
     if(NOT DEFINED EXECUTABLE_NAME AND ARGC GREATER 0)
         set(EXECUTABLE_NAME "${ARGV0}")
     elseif(NOT DEFINED EXECUTABLE_NAME)
-        set(EXECUTABLE_NAME "${MODULE_NAME}")
+        # Check to be sure before using
+        if (NOT DEFINED FPRIME_CURRENT_MODULE)
+            message(FATAL_ERROR "FPRIME_CURRENT_MODULE not defined. Please supply name to: register_fprime_executable()")
+        endif()
+        set(EXECUTABLE_NAME "${FPRIME_CURRENT_MODULE}")
     endif()
     get_nearest_build_root(${CMAKE_CURRENT_LIST_DIR})
     generate_executable("${EXECUTABLE_NAME}" "${SOURCE_FILES}" "${MOD_DEPS}")
@@ -259,12 +321,12 @@ endfunction(register_fprime_executable)
 #
 # Required variables (defined in calling scope):
 #
-# - **SOURCE_FILES:** cmake list of input source files. Place any "*Ai.xml", "*.c", "*.cpp"
+# - **SOURCE_FILES:** cmake list of input source files. Place any "*.fpp", "*.c", "*.cpp"
 #                     etc. files here. This list will be split into autocoder inputs and sources.
 # **i.e.:**
 # ```
 # set(SOURCE_FILES
-#     MyComponentAi.xml
+#     MyComponent.fpp
 #     SomeFile.cpp
 #     MyComponentImpl.cpp)
 # ```
@@ -276,7 +338,7 @@ endfunction(register_fprime_executable)
 # **i.e.:**
 # ```
 # set(MOD_DEPS
-#     ${PROJECT_NAME}/Top
+#     ${FPRIME_CURRENT_MODULE}/Top
 #     Module1
 #     Module2
 #     -lpthread)
@@ -284,36 +346,34 @@ endfunction(register_fprime_executable)
 #
 # **Note:** this operates almost identically to `register_fprime_executable` and `register_fprime_module` with respect
 # to the variable definitions. The difference is deployment targets will be run (e.g. dictionary generation), and the
-# executable binary will be named for ${PROJECT_NAME}.
+# executable binary will be named after the module, or if project when defined directly in a project CMakeLists.txt
 #
 # ### Standard fprime Deployment Example ###
 #
-# To create a standard fprime deployment, an executable needs to be created. This executable
-# uses the CMake PROJECT_NAME as the executable name. Thus, it can be created with the following
-# source lists. In most fprime deployments, some modules must be specified as they don't tie
-# directly to an Ai.xml.
+# To create a standard fprime deployment, an the user must call `register_fprime_deployment()` after defining
+# SOURCE_FILES and MOD_DEPS.
 #
 # ```
 # set(SOURCE_FILES
 #   "${CMAKE_CURRENT_LIST_DIR}/Main.cpp"
 # )
-# # Note: supply non-explicit dependencies here. These are implementations to an XML that is
-# # defined in a different module.
+# # Note: supply dependencies that cannot be detected via the model here.
 # set(MOD_DEPS
-#   ${PROJECT_NAME}/Top
+#   ${FPRIME_CURRENT_MODULE}/Top
 # )
 # register_fprime_deployment()
 # ```
 ####
 function(register_fprime_deployment)
-    get_module_name("${CMAKE_CURRENT_LIST_DIR}")
     if (NOT DEFINED SOURCE_FILES AND NOT DEFINED MOD_DEPS)
         message(FATAL_ERROR "SOURCE_FILES or MOD_DEPS must be defined when registering an executable")
-    elseif(NOT MODULE_NAME STREQUAL PROJECT_NAME)
-        message(WARNING "Project name ${PROJECT_NAME} does not match expected name ${MODULE_NAME}")
+    endif()
+    # Fallback to PROJECT_NAME when it is not set
+    if (NOT DEFINED FPRIME_CURRENT_MODULE)
+        set(FPRIME_CURRENT_MODULE "${PROJECT_NAME}")
     endif()
     get_nearest_build_root(${CMAKE_CURRENT_LIST_DIR})
-    generate_deployment("${PROJECT_NAME}" "${SOURCE_FILES}" "${MOD_DEPS}")
+    generate_deployment("${FPRIME_CURRENT_MODULE}" "${SOURCE_FILES}" "${MOD_DEPS}")
 endfunction(register_fprime_deployment)
 
 
@@ -325,7 +385,7 @@ endfunction(register_fprime_deployment)
 # unit test name, autocoding and source inputs for the unit test, and (optionally) any
 # non-standard link dependencies.
 #
-# **Note:** This is ONLY run when the build type is TESTING. Unit testing is restricted to this build type as fprime
+# **Note:** This is ONLY run when the BUILD_TESTING is enabled. Unit testing is restricted to this build type as fprime
 #           sets additional flags when building for unit tests.
 #
 # Required variables (defined in calling scope):
@@ -334,14 +394,14 @@ endfunction(register_fprime_deployment)
 # - **UT_NAME:** (optional) executable name supplied. If not supplied, or passed in, then
 #   the <MODULE_NAME>_ut_exe will be used.
 #
-# - **UT_SOURCE_FILES:** cmake list of UT source files. Place any "*Ai.xml", "*.c", "*.cpp"
+# - **UT_SOURCE_FILES:** cmake list of UT source files. Place any "*.fpp", "*.c", "*.cpp"
 #   etc. files here. This list will be split into autocoder inputs or sources. These sources only apply to the unit
 #   test.
 #
 #  **i.e.:**
 # ```
 # set(UT_SOURCE_FILES
-#     MyComponentAi.xml
+#     MyComponent.fpp
 #     SomeFile.cpp
 #     MyComponentImpl.cpp)
 # ```
@@ -360,15 +420,19 @@ endfunction(register_fprime_deployment)
 # ```
 #  **Note:** this is typically called after any other register calls in the module.
 #
+# - **UT_AUTO_HELPERS:** (optional) When set ON, a test helper file will be generated that auto-codes the connect ports
+#   and init components methods. This removes the maintenance overhead for these functions. ON additionally adds test
+#   source directories to the include path for the unit test target. When set to OFF, this helper file will be created
+#   when generating implementation templates allowing users to modify these files. Default: OFF
+#
 # ### Unit-Test Example ###
 #
-# A standard unit test defines only UT_SOURCES. These sources have the test cpp files and the module
-# Ai.xml of the module being tested. This is used to generate the GTest and TesterBase files from this
-# Ai.xml. The other UT source files define the implementation of the test.
+# A standard unit test defines only UT_SOURCES. These sources have the test cpp files and the model
+# .fpp of the module being tested. This is used to generate the GTest harness.
 #
 # ```
 # set(UT_SOURCE_FILES
-#   "${FPRIME_FRAMEWORK_PATH}/Svc/CmdDispatcher/CommandDispatcherComponentAi.xml"
+#   "${FPRIME_FRAMEWORK_PATH}/Svc/CmdDispatcher/CommandDispatcher.fpp"
 #   "${CMAKE_CURRENT_LIST_DIR}/test/ut/CommandDispatcherTester.cpp"
 #   "${CMAKE_CURRENT_LIST_DIR}/test/ut/CommandDispatcherImplTester.cpp"
 # )
@@ -423,7 +487,8 @@ endfunction(register_fprime_ut)
 macro(register_fprime_target TARGET_FILE_PATH)
     # Normal registered targets don't run in prescan
     if (NOT DEFINED FPRIME_PRESCAN)
-        register_fprime_target_helper("${TARGET_FILE_PATH}" FPRIME_TARGET_LIST)
+        register_fprime_list_helper("${TARGET_FILE_PATH}" FPRIME_TARGET_LIST)
+        setup_global_target("${TARGET_FILE_PATH}")
     endif()
 endmacro(register_fprime_target)
 
@@ -438,34 +503,52 @@ endmacro(register_fprime_target)
 macro(register_fprime_ut_target TARGET_FILE_PATH)
     # UT targets only allowed when testing
     if (BUILD_TESTING AND NOT DEFINED FPRIME_PRESCAN)
-        register_fprime_target_helper("${TARGET_FILE_PATH}" FPRIME_UT_TARGET_LIST)
+        register_fprime_list_helper("${TARGET_FILE_PATH}" FPRIME_UT_TARGET_LIST)
+        setup_global_target("${TARGET_FILE_PATH}")
     endif()
 endmacro(register_fprime_ut_target)
 
 ####
-# Macro `register_fprime_target_helper`:
+# Macro `register_fprime_list_helper`:
 #
 # Helper function to do the actual registration. Also used to side-load prescan to bypass the not-on-prescan check.
 ####
-macro(register_fprime_target_helper TARGET_FILE_PATH TARGET_LIST)
+macro(register_fprime_list_helper TARGET_FILE_PATH TARGET_LIST)
     include("${TARGET_FILE_PATH}")
     # Prevent out-of-order setups
     get_property(MODULE_DETECTION_STARTED GLOBAL PROPERTY MODULE_DETECTION SET)
     if (MODULE_DETECTION_STARTED)
         message(FATAL_ERROR "Cannot register fprime target after including subdirectories or FPrime-Code.cmake'")
     endif()
-    # Get the target list to add this target to or use default
-    set(LIST_NAME FPRIME_TARGET_LIST)
-    if (${ARGC} GREATER 1)
-        set(LIST_NAME "${ARGV1}")
-    endif()
     get_property(TARGETS GLOBAL PROPERTY "${TARGET_LIST}")
     if (NOT TARGET_FILE_PATH IN_LIST TARGETS)
-        set_property(GLOBAL APPEND PROPERTY "${LIST_NAME}" "${TARGET_FILE_PATH}")
-        setup_global_target("${TARGET_FILE_PATH}")
+        set_property(GLOBAL APPEND PROPERTY "${TARGET_LIST}" "${TARGET_FILE_PATH}")
     endif()
-endmacro(register_fprime_target_helper)
+endmacro(register_fprime_list_helper)
 
+
+####
+# Macro `register_fprime_build_autocoder`:
+# 
+# This function allows users to register custom autocoders into the build system. These autocoders will execute during
+# the build process. An autocoder is defined in a CMake file and must do three things:
+# 1. Call one of `autocoder_setup_for_individual_sources()` or `autocoder_setup_for_multiple_sources()` from file scope
+# 2. Implement `<autocoder name>_is_supported(AC_POSSIBLE_INPUT_FILE)` returning true the autocoder processes given source 
+# 3. Implement `<autocoder name>_setup_autocode AC_INPUT_FILE)` to run the autocoder on files filter by item 2. 
+# See: [Autocoders](dev/autocoder_integration.md).
+#
+# This function takes in either a file path to a CMake file defining an autocoder target, or an short include path that accomplishes
+# the same thing. Note: make sure the directory is on the CMake include path to use the second form.
+#
+# **TARGET_FILE_PATH:** include path or file path file defining above functions
+###
+macro(register_fprime_build_autocoder TARGET_FILE_PATH)
+    # Normal registered targets don't run in prescan
+    message(STATUS "Registering custom autocoder: ${TARGET_FILE_PATH}")
+    if (NOT DEFINED FPRIME_PRESCAN)
+        register_fprime_list_helper("${TARGET_FILE_PATH}" FPRIME_AUTOCODER_TARGET_LIST)
+    endif()
+endmacro(register_fprime_build_autocoder)
 
 #### Documentation links
 # Next Topics:
